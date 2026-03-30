@@ -14,6 +14,7 @@ SPORT_RUNNING = 1
 DURATION_TIME = 0
 DURATION_OPEN = 5
 TARGET_SPEED = 0
+TARGET_HEART_RATE = 1
 TARGET_OPEN = 2
 INTENSITY_ACTIVE = 0
 INTENSITY_REST = 1
@@ -39,6 +40,9 @@ class Step:
     pace_min: Optional[str] = None
     pace_max: Optional[str] = None
     avg_pace: Optional[str] = None
+    hr_min: Optional[str] = None
+    hr_max: Optional[str] = None
+    avg_hr: Optional[str] = None
     repeats: int = 1
 
 
@@ -99,6 +103,22 @@ def pace_seconds_to_mps(sec_per_km: int) -> float:
     return 1000.0 / sec_per_km
 
 
+def parse_heart_rate(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    bpm = int(value)
+    if bpm <= 0:
+        raise ValueError(f"Пульс должен быть > 0: {value!r}")
+    return bpm
+
+
+def encode_fit_heart_rate_value(bpm: int) -> int:
+    return bpm + 100
+
+
 def build_speed_range_from_pace(
     pace_min: Optional[str],
     pace_max: Optional[str],
@@ -119,6 +139,57 @@ def build_speed_range_from_pace(
     speed_low = pace_seconds_to_mps(slowest)
     speed_high = pace_seconds_to_mps(fastest)
     return int(round(speed_low * 1000)), int(round(speed_high * 1000))
+
+
+def build_heart_rate_range(
+    hr_min: Optional[str],
+    hr_max: Optional[str],
+    avg_hr: Optional[str],
+    default_tolerance_bpm: int = 3,
+) -> Optional[Tuple[int, int]]:
+    low_bpm = parse_heart_rate(hr_min)
+    high_bpm = parse_heart_rate(hr_max)
+    avg_bpm = parse_heart_rate(avg_hr)
+    if low_bpm is not None and high_bpm is not None:
+        low = min(low_bpm, high_bpm)
+        high = max(low_bpm, high_bpm)
+    elif avg_bpm is not None:
+        low = max(1, avg_bpm - default_tolerance_bpm)
+        high = avg_bpm + default_tolerance_bpm
+    else:
+        return None
+    return encode_fit_heart_rate_value(low), encode_fit_heart_rate_value(high)
+
+
+def build_step_target(
+    pace_min: Optional[str],
+    pace_max: Optional[str],
+    avg_pace: Optional[str],
+    hr_min: Optional[str],
+    hr_max: Optional[str],
+    avg_hr: Optional[str],
+    default_tolerance_sec: int = 5,
+    default_tolerance_bpm: int = 3,
+) -> Tuple[int, int, int]:
+    speed_range = build_speed_range_from_pace(
+        pace_min=pace_min,
+        pace_max=pace_max,
+        avg_pace=avg_pace,
+        default_tolerance_sec=default_tolerance_sec,
+    )
+    heart_rate_range = build_heart_rate_range(
+        hr_min=hr_min,
+        hr_max=hr_max,
+        avg_hr=avg_hr,
+        default_tolerance_bpm=default_tolerance_bpm,
+    )
+    if speed_range and heart_rate_range:
+        raise ValueError("Нельзя одновременно задавать pace и heart rate для одного шага")
+    if speed_range:
+        return TARGET_SPEED, speed_range[0], speed_range[1]
+    if heart_rate_range:
+        return TARGET_HEART_RATE, heart_rate_range[0], heart_rate_range[1]
+    return TARGET_OPEN, INVALID_UINT32, INVALID_UINT32
 
 
 def step_type_to_intensity(step_type: str) -> int:
@@ -166,6 +237,9 @@ def read_csv_steps(csv_path: str | Path) -> List[Step]:
                 pace_min = (row.get("pace_min") or "").strip() or None
                 pace_max = (row.get("pace_max") or "").strip() or None
                 avg_pace = (row.get("avg_pace") or "").strip() or None
+                hr_min = (row.get("hr_min") or "").strip() or None
+                hr_max = (row.get("hr_max") or "").strip() or None
+                avg_hr = (row.get("avg_hr") or "").strip() or None
                 if not step_name:
                     raise ValueError("step_name пустой")
                 if not step_type:
@@ -179,8 +253,28 @@ def read_csv_steps(csv_path: str | Path) -> List[Step]:
                 if repeats <= 0:
                     raise ValueError("repeats должен быть >= 1")
                 _ = step_type_to_intensity(step_type)
-                _ = build_speed_range_from_pace(pace_min=pace_min, pace_max=pace_max, avg_pace=avg_pace)
-                steps.append(Step(step_name, step_type, duration_sec, pace_min, pace_max, avg_pace, repeats))
+                _ = build_step_target(
+                    pace_min=pace_min,
+                    pace_max=pace_max,
+                    avg_pace=avg_pace,
+                    hr_min=hr_min,
+                    hr_max=hr_max,
+                    avg_hr=avg_hr,
+                )
+                steps.append(
+                    Step(
+                        step_name,
+                        step_type,
+                        duration_sec,
+                        pace_min,
+                        pace_max,
+                        avg_pace,
+                        hr_min,
+                        hr_max,
+                        avg_hr,
+                        repeats,
+                    )
+                )
             except Exception as e:
                 raise ValueError(f"Ошибка в строке CSV {row_num}: {e}") from e
     if not steps:
@@ -193,7 +287,20 @@ def expand_steps(steps: List[Step]) -> List[Step]:
     for step in steps:
         for i in range(step.repeats):
             step_name = f"{step.name} {i+1}/{step.repeats}" if step.repeats > 1 else step.name
-            expanded.append(Step(step_name, step.step_type, step.duration_sec, step.pace_min, step.pace_max, step.avg_pace, 1))
+            expanded.append(
+                Step(
+                    step_name,
+                    step.step_type,
+                    step.duration_sec,
+                    step.pace_min,
+                    step.pace_max,
+                    step.avg_pace,
+                    step.hr_min,
+                    step.hr_max,
+                    step.avg_hr,
+                    1,
+                )
+            )
     return expanded
 
 
@@ -258,21 +365,16 @@ def build_workout_step_message(index: int, step: Step, default_tolerance_sec: in
     else:
         duration_type = DURATION_TIME
         duration_value = step.duration_sec * 1000
-    speed_range = build_speed_range_from_pace(
+    target_type, custom_target_low, custom_target_high = build_step_target(
         pace_min=step.pace_min,
         pace_max=step.pace_max,
         avg_pace=step.avg_pace,
+        hr_min=step.hr_min,
+        hr_max=step.hr_max,
+        avg_hr=step.avg_hr,
         default_tolerance_sec=default_tolerance_sec,
     )
-    if speed_range is None:
-        target_type = TARGET_OPEN
-        target_value = 0
-        custom_target_low = INVALID_UINT32
-        custom_target_high = INVALID_UINT32
-    else:
-        custom_target_low, custom_target_high = speed_range
-        target_type = TARGET_SPEED
-        target_value = 0
+    target_value = 0
     return b"".join([
         struct.pack("<H", index),
         encode_string(step.name, STEP_NAME_SIZE),
@@ -316,13 +418,13 @@ def convert_csv_to_fit(csv_path: str | Path, fit_path: str | Path, workout_name:
 def create_sample_csv(csv_path: str | Path = "sample_workout.csv") -> Path:
     csv_path = Path(csv_path)
     rows = [
-        ["step_name", "step_type", "duration_sec", "pace_min", "pace_max", "avg_pace", "repeats"],
-        ["Разминка", "warmup", "720", "7:20", "7:35", "", "1"],
-        ["Ускорение", "interval", "20", "5:40", "5:55", "", "4"],
-        ["Восстановление", "recovery", "40", "7:40", "8:20", "", "4"],
-        ["Основной интервал", "interval", "120", "6:00", "6:10", "", "6"],
-        ["Восстановление", "recovery", "120", "7:40", "8:10", "", "6"],
-        ["Заминка", "cooldown", "600", "7:20", "7:50", "", "1"],
+        ["step_name", "step_type", "duration_sec", "pace_min", "pace_max", "avg_pace", "hr_min", "hr_max", "avg_hr", "repeats"],
+        ["Разминка", "warmup", "720", "7:20", "7:35", "", "", "", "", "1"],
+        ["Ускорение", "interval", "20", "", "", "", "165", "175", "", "4"],
+        ["Восстановление", "recovery", "40", "", "", "", "130", "145", "", "4"],
+        ["Основной интервал", "interval", "120", "6:00", "6:10", "", "", "", "", "6"],
+        ["Восстановление", "recovery", "120", "", "", "", "", "", "140", "6"],
+        ["Заминка", "cooldown", "600", "7:20", "7:50", "", "", "", "", "1"],
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
